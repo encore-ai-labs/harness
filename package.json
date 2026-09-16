@@ -1,0 +1,26 @@
+{
+  "name": "harness",
+  "version": "0.1.0",
+  "description": "A coding-agent harness around xAI Grok. Contract, context map, tool gateway, policy, durable state, evidence, recovery, traces.",
+  "type": "module",
+  "bin": {
+    "harness": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "oxlint src test",
+    "lint:fix": "oxlint src test --fix",
+    "format": "oxfmt src test",
+    "format:check": "oxfmt --check src test",
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
+    "typescript": "^5.6.0"
+  }
+}
