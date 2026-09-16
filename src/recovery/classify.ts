@@ -87,9 +87,29 @@ export function classifyApiError(status: number | null, message: string): Failur
  * Detects the "repeated unchanged failure" loop: same tool, same arguments,
  * failing again. Keyed on a stable serialization of (name, args).
  */
+export type RepeatSnapshot = {
+  failures: Record<string, number>;
+  successes: Record<string, number>;
+};
+
 export class RepeatDetector {
   private failures = new Map<string, number>();
   private successes = new Map<string, number>();
+
+  static from(data?: RepeatSnapshot | null): RepeatDetector {
+    const d = new RepeatDetector();
+    if (!data) return d;
+    for (const [k, v] of Object.entries(data.failures ?? {})) d.failures.set(k, v);
+    for (const [k, v] of Object.entries(data.successes ?? {})) d.successes.set(k, v);
+    return d;
+  }
+
+  toJSON(): RepeatSnapshot {
+    return {
+      failures: Object.fromEntries(this.failures),
+      successes: Object.fromEntries(this.successes),
+    };
+  }
 
   private key(name: string, args: unknown): string {
     return JSON.stringify([name, args]);

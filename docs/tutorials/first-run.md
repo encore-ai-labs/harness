@@ -10,9 +10,9 @@ From a project directory:
 harness chat "what does src/index.ts do?"
 ```
 
-You should see your prompt in a dark banner, dim readable thoughts (not mixed into the answer), grouped tool work (`Read, globbed, grepped …` and green `Edited file +N` previews), then the answer as markdown. Type another `›` message while it is working to interrupt and steer. Paste a screenshot; on macOS an empty paste reads the clipboard. Ctrl-C interrupts without sending a message.
+You should see your prompt in a dark banner, a cycling spinner while it thinks (`just choding…`, `choding around…`, … — `/think` peeks at the actual reasoning), grouped tool work (`Read, globbed, grepped …` and green `Edited file +N` previews), then the answer as markdown. Type another `›` message while it is working to interrupt and steer. Paste a screenshot; on macOS an empty paste reads the clipboard. Ctrl-C interrupts without sending a message.
 
-Slash commands: `/cost`, `/rewind <sha>`, `/quit`. Skills: `harness skill add EvanBacon/serve-sim` (see [use skills](../how-to/use-skills.md)).
+Slash commands: `/think`, `/cost`, `/rewind <sha>`, `/quit`. Skills: `harness skill add EvanBacon/serve-sim` (see [use skills](../how-to/use-skills.md)).
 
 ## 2. Inspect `.harness/`
 

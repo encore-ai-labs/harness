@@ -209,7 +209,7 @@ export function userMessage(text: string, meta?: ItemMeta, images?: UserImage[])
   return { type: "message", role: "user", content: parts, meta: base };
 }
 
-/** Harness → model. Not the human. Used for the per-turn plan/budget reminder. */
+/** Harness → model. Not the human. Used for the ephemeral workspace/state reminder. */
 export function developerMessage(text: string, meta?: ItemMeta): MessageItem {
   return {
     type: "message",

@@ -34,7 +34,7 @@ export async function repl(opts: {
     askApproval,
   });
   line(c.dim(`session ${rt.session.id}  ${rt.cfg.model}  mode ${rt.cfg.mode}`));
-  line(c.dim("type to steer while it works · paste an image · /cost /rewind /quit"));
+  line(c.dim("type to steer while it works · paste an image · /think /cost /rewind /quit"));
 
   const tty = !!process.stdin.isTTY;
   if (tty) editor.start();
@@ -50,13 +50,7 @@ export async function repl(opts: {
       line(c.dim("bye"));
       process.exit(0);
     }
-    if (text === "/cost") {
-      line(
-        `${fmtUsd(rt.session.meta.costUsd)}  ${rt.session.meta.turns} turns  ${rt.session.meta.usage.cached_tokens} cached tokens`,
-      );
-      editor.redraw();
-      return;
-    }
+    if (applyMetaSlash(rt, text, editor)) return;
     if (text.startsWith("/rewind")) {
       const sha = text.slice(7).trim() || rt.session.meta.checkpoints.at(-1)?.sha;
       if (!sha) {
@@ -102,6 +96,7 @@ export async function repl(opts: {
         line(c.dim("bye"));
         process.exit(0);
       }
+      if (applyMetaSlash(rt, text, editor)) return;
       if (!text && !t.images.length) return;
       pendingSteer = t;
       line(c.yellow("steering…"));
@@ -150,4 +145,27 @@ export async function repl(opts: {
     }
     onTurn(r);
   }
+}
+
+/** /cost and /think do not abort the in-flight turn. */
+function applyMetaSlash(rt: Runtime, text: string, editor: LineEditor): boolean {
+  if (text === "/cost") {
+    line(
+      `${fmtUsd(rt.session.meta.costUsd)}  ${rt.session.meta.turns} turns  ${rt.session.meta.usage.cached_tokens} cached tokens`,
+    );
+    editor.redraw();
+    return true;
+  }
+  if (text === "/think" || text.startsWith("/think ")) {
+    const arg = text.slice("/think".length).trim().toLowerCase();
+    const current = rt.session.meta.showReasoning ?? false;
+    const on = arg === "on" ? true : arg === "off" ? false : !current;
+    rt.session.meta.showReasoning = on;
+    rt.session.saveMeta();
+    rt.ui.setShowReasoning?.(on);
+    line(c.dim(on ? "reasoning on" : "reasoning hidden · /think to peek"));
+    editor.redraw();
+    return true;
+  }
+  return false;
 }

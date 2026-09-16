@@ -6,6 +6,7 @@ import { loadConfig, estimateCost, type CliOverrides, type Config } from "../con
 import { buildProjectMap, type ProjectMap } from "../context/map.ts";
 import { Policy } from "../policy/policy.ts";
 import {
+  approxTokens,
   isFunctionCall,
   textOf,
   userMessage,
@@ -18,6 +19,7 @@ import {
 import { XaiClient } from "../provider/xai.ts";
 import { RepeatDetector } from "../recovery/classify.ts";
 import { Checkpoints } from "../state/checkpoint.ts";
+import { WorkspaceLock } from "../state/lock.ts";
 import { Session } from "../state/session.ts";
 import { StateStore } from "../state/store.ts";
 import { Trace } from "../state/trace.ts";
@@ -45,14 +47,7 @@ import { howBeforeMutate, noteObservation, planBeforeWrite } from "./gates.ts";
 import { buildInstructions, buildReminder } from "./prompt.ts";
 import { writeReceipt } from "./receipt.ts";
 import { verify } from "./verify.ts";
-import {
-  Spinner,
-  fmtUsd,
-  toolLine,
-  ChatUi,
-  type WorkEvent,
-  type ChatUiHooks,
-} from "../cli/render.ts";
+import { fmtUsd, toolLine, ChatUi, type WorkEvent, type ChatUiHooks } from "../cli/render.ts";
 import type { UserImage } from "../provider/types.ts";
 
 export interface Ui {
@@ -64,12 +59,15 @@ export interface Ui {
   flushWork?: () => void;
   note: (s: string) => void;
   endMessage?: () => void;
+  beginTurn?: (chrome?: { budget?: string }) => void;
+  setShowReasoning?: (on: boolean) => void;
+  showingReasoning?: () => boolean;
 }
 
 export const silentUi: Ui = { text() {}, tool() {}, note() {} };
 
-export function ttyUi(hooks?: ChatUiHooks): Ui {
-  const chat = new ChatUi(hooks);
+export function ttyUi(hooks?: ChatUiHooks, opts?: { showReasoning?: boolean }): Ui {
+  const chat = new ChatUi(hooks, opts);
   return {
     user: (t, n) => chat.user(t, n),
     text: (s) => chat.text(s),
@@ -79,6 +77,9 @@ export function ttyUi(hooks?: ChatUiHooks): Ui {
     flushWork: () => chat.flushWork(),
     note: (s) => chat.note(s),
     endMessage: () => chat.endMessage(),
+    beginTurn: (chrome) => chat.beginTurn(chrome),
+    setShowReasoning: (on) => chat.setShowReasoning(on),
+    showingReasoning: () => chat.showingReasoning(),
   };
 }
 
@@ -92,6 +93,13 @@ export interface Runtime {
   gateway: ToolGateway;
   client: Provider;
   map: ProjectMap;
+  /** Session-start tree; reminder reports drift against this. */
+  frozenTree: string;
+  /** Frozen prefix. Rebuilt only when a contract is first attached. */
+  instructions: string;
+  observed: Set<string>;
+  repeats: RepeatDetector;
+  lock: WorkspaceLock;
   interactive: boolean;
   kind: "chat" | "run";
   ui: Ui;
@@ -120,6 +128,16 @@ export interface RunResult {
 }
 
 export async function boot(opts: BootOpts): Promise<Runtime> {
+  const lock = WorkspaceLock.acquire(opts.cwd);
+  try {
+    return await bootLocked(opts, lock);
+  } catch (e) {
+    lock.release();
+    throw e;
+  }
+}
+
+async function bootLocked(opts: BootOpts, lock: WorkspaceLock): Promise<Runtime> {
   const cfg = loadConfig(opts.cwd, opts.cli ?? {});
   const session = opts.sessionId
     ? Session.load(opts.cwd, opts.sessionId)
@@ -168,6 +186,9 @@ export async function boot(opts: BootOpts): Promise<Runtime> {
     resumed: !!opts.sessionId,
   });
   trace.log({ ev: "context.loaded", sources: map.sources, chars: map.chars });
+  const interactive = opts.interactive;
+  const ui = opts.ui ?? silentUi;
+  if (session.meta.showReasoning) ui.setShowReasoning?.(true);
   return {
     cwd: opts.cwd,
     cfg,
@@ -178,9 +199,19 @@ export async function boot(opts: BootOpts): Promise<Runtime> {
     gateway,
     client,
     map,
-    interactive: opts.interactive,
+    frozenTree: map.tree,
+    instructions: buildInstructions({
+      cfg,
+      map,
+      contract: session.meta.contract,
+      interactive,
+    }),
+    observed: new Set(session.meta.observed ?? []),
+    repeats: RepeatDetector.from(session.meta.repeats),
+    lock,
+    interactive,
     kind: opts.kind ?? (opts.interactive ? "chat" : "run"),
-    ui: opts.ui ?? silentUi,
+    ui,
     startedAt: Date.now(),
   };
 }
@@ -208,28 +239,28 @@ export async function run(
       rt.session.saveMeta();
       rt.trace.log({ ev: "contract.created", contract });
       rt.ui.note("contract: " + contract.goal);
+      rt.instructions = buildInstructions({
+        cfg: rt.cfg,
+        map: rt.map,
+        contract,
+        interactive: rt.interactive,
+      });
     } catch (e) {
       rt.ui.note("contract draft failed: " + (e as Error).message);
     }
   }
 
-  const observed = new Set<string>();
-  const repeats = new RepeatDetector();
+  const observed = rt.observed;
+  const repeats = rt.repeats;
   let lastText = "";
   let verifyRound = 0;
-  let filesChanged = false;
   const requirePlan =
     !rt.interactive &&
     ((rt.session.meta.contract?.doneWhen.length ?? 0) > 1 ||
       (rt.session.meta.contract?.checks.length ?? 0) > 1 ||
       rt.kind === "run");
   const effort = rt.kind === "chat" ? (rt.cfg.reasoningEffort ?? "medium") : rt.cfg.reasoningEffort;
-  let instructions = buildInstructions({
-    cfg: rt.cfg,
-    map: rt.map,
-    contract: rt.session.meta.contract,
-    interactive: rt.interactive,
-  });
+  const instructions = rt.instructions;
 
   const deadline = Date.now() + rt.cfg.budgets.maxMinutes * 60_000;
 
@@ -292,35 +323,28 @@ export async function run(
 
     const reminder = buildReminder({
       state: rt.state,
-      costUsd: rt.session.meta.costUsd,
-      maxCostUsd: rt.cfg.budgets.maxCostUsd,
-      turns: rt.session.meta.turns - turn0,
-      maxTurns: rt.cfg.budgets.maxTurns,
+      map: rt.map,
+      frozenTree: rt.frozenTree,
+      compacted: cursor.compactedThroughTurn >= 0,
     });
-    const input: Item[] = [
-      ...project(rt.session.messages, cursor),
-      developerMessage(reminder, { kind: "reminder" }),
-    ];
+    const projected = project(rt.session.messages, cursor);
+    const input: Item[] = reminder
+      ? [...projected, developerMessage(reminder, { kind: "reminder" })]
+      : [...projected];
     const turn = rt.session.meta.turns + 1;
     rt.trace.log({
       ev: "model.request",
       turn,
       model: rt.cfg.model,
       messages: input.length,
-      approxTokens: Math.ceil((instructions.length + reminder.length) / 4),
+      approxTokens: approxTokens(projected, instructions.length + reminder.length),
     });
 
     const inflight = new Map<string, Promise<GatewayOutcome>>();
     const ctx = toolCtx(rt, turn, opts.signal);
-    const spin = rt.ui === silentUi ? null : new Spinner("thinking");
-    spin?.start();
-    let first = true;
-    const stopSpin = () => {
-      if (first) {
-        first = false;
-        spin?.stop();
-      }
-    };
+    rt.ui.beginTurn?.({
+      budget: `${fmtUsd(rt.session.meta.costUsd)} of ${fmtUsd(rt.cfg.budgets.maxCostUsd)} · turn ${rt.session.meta.turns - turn0}/${rt.cfg.budgets.maxTurns}`,
+    });
 
     let textBuf = "";
     let sawTool = false;
@@ -337,18 +361,15 @@ export async function run(
         stream: true,
         signal: opts.signal,
         onText: (d) => {
-          stopSpin();
-          if (sawTool) rt.ui.reasoning?.(d);
-          else textBuf += d;
+          if (sawTool) return;
+          textBuf += d;
         },
         onReasoning: (d) => {
-          stopSpin();
           rt.ui.reasoning?.(d);
         },
         onItem: (item) => {
           if (!isFunctionCall(item)) return;
           if (!sawTool) {
-            if (textBuf) rt.ui.reasoning?.(textBuf);
             textBuf = "";
             sawTool = true;
           }
@@ -361,22 +382,18 @@ export async function run(
         },
       });
     } catch (e) {
-      stopSpin();
       if (isAbortError(e, opts.signal)) return finishRun(rt, lastText, { interrupted: true });
       rt.session.setStatus("failed");
       lastText = `model error: ${(e as Error).message}`;
       rt.ui.note(lastText);
       break;
     }
-    stopSpin();
 
     const cost = estimateCost(rt.cfg, rt.cfg.model, result.usage);
     rt.session.addUsage(result.usage, cost);
     rt.session.meta.turns = turn;
     const calls = result.output.filter(isFunctionCall);
-    if (calls.length) {
-      if (textBuf) rt.ui.reasoning?.(textBuf);
-    } else if (textBuf) {
+    if (!calls.length && textBuf) {
       rt.ui.text(textBuf);
       rt.ui.endMessage?.();
     }
@@ -408,6 +425,7 @@ export async function run(
         lastText = `repeated failure: ${c.name}`;
       }
     }
+    persistMemory(rt);
     rt.ui.flushWork?.();
     const hasPlan = rt.state.getPlan().steps.length > 0;
     for (const c of writes) {
@@ -427,7 +445,6 @@ export async function run(
       }
       emitTool(rt, c, outcome, turn);
       noteObservation(observed, c, outcome.result.ok);
-      if (outcome.result.changed?.length) filesChanged = true;
       if (c.name === "update_plan" && outcome.result.ok) {
         /* hasPlan is re-read from store */
       }
@@ -442,6 +459,7 @@ export async function run(
         lastText = `repeated failure: ${c.name}`;
       }
     }
+    persistMemory(rt);
 
     const toolMs = Date.now() - t0tools;
     const cachedFraction = result.usage.input_tokens
@@ -462,14 +480,8 @@ export async function run(
 
     if (opts.signal?.aborted) return finishRun(rt, lastText, { interrupted: true });
 
-    if (filesChanged) {
+    if (await rt.checkpoints.dirty()) {
       rt.map = await buildProjectMap(rt.cwd, rt.cfg.instructionFiles);
-      instructions = buildInstructions({
-        cfg: rt.cfg,
-        map: rt.map,
-        contract: rt.session.meta.contract,
-        interactive: rt.interactive,
-      });
       const snap = await rt.checkpoints.snapshot(`turn ${turn}`);
       if (snap) {
         rt.session.addCheckpoint({
@@ -487,7 +499,6 @@ export async function run(
           files: snap.files,
         });
       }
-      filesChanged = false;
     }
 
     if (
@@ -545,11 +556,18 @@ function isAbortError(e: unknown, signal?: AbortSignal): boolean {
   return /aborted|AbortError/i.test(m);
 }
 
+function persistMemory(rt: Runtime) {
+  rt.session.meta.observed = [...rt.observed];
+  rt.session.meta.repeats = rt.repeats.toJSON();
+  rt.session.saveMeta();
+}
+
 function finishRun(
   rt: Runtime,
   lastText: string,
   extra: { interrupted?: boolean } = {},
 ): RunResult {
+  persistMemory(rt);
   const extras = sealDanglingCalls(rt.session.messages).slice(rt.session.messages.length);
   if (extras.length) rt.session.appendAll(extras);
   if (extra.interrupted) {

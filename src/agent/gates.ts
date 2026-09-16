@@ -14,7 +14,10 @@ export function pathsOfCall(call: FunctionCallItem): string[] {
       return typeof a.path === "string" ? [a.path] : [];
     }
     if (call.name === "grep" || call.name === "glob" || call.name === "ls") {
-      return typeof a.path === "string" ? [a.path] : ["."];
+      if (typeof a.path !== "string") return [];
+      const n = norm(a.path);
+      if (!n || n === ".") return [];
+      return [a.path];
     }
     if (call.name === "apply_patch" && typeof a.patch === "string") return patchPaths(a.patch);
   } catch {
@@ -32,11 +35,16 @@ export function noteObservation(observed: Set<string>, call: FunctionCallItem, o
 
 export function stateKnowsPath(state: StateStore, path: string): boolean {
   const n = norm(path);
-  const blob = [
+  const texts = [
     ...state.get().facts.map((f) => f.text),
     ...state.get().decisions.map((d) => d.text),
-  ].join("\n");
-  return blob.includes(n) || blob.includes(path);
+  ];
+  return texts.some((t) =>
+    t
+      .split(/[^A-Za-z0-9_./-]+/)
+      .map(norm)
+      .some((tok) => tok === n || tok === path),
+  );
 }
 
 /** Deny the first mutating file tool until the file has been observed. */
@@ -74,7 +82,7 @@ export function planBeforeWrite(
 
 function isObserved(observed: Set<string>, path: string): boolean {
   const n = norm(path);
-  if (observed.has(n) || observed.has(".")) return true;
+  if (observed.has(n)) return true;
   for (const o of observed) {
     if (n === o || n.startsWith(o.endsWith("/") ? o : o + "/") || o.startsWith(n + "/"))
       return true;

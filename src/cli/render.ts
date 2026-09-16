@@ -122,17 +122,53 @@ export class MarkdownStream {
   }
 }
 
+export interface ChatUiHooks {
+  /** Erase the input line before we write so the prompt stays at the bottom. */
+  before?: () => void;
+  after?: () => void;
+}
+
+const THINK_LABELS = [
+  "just choding…",
+  "choding around…",
+  "thinking",
+  "choding on it",
+  "poking around",
+  "still choding",
+  "tracing it",
+  "holding the thought",
+  "choding through it",
+  "chewing on it",
+  "mapping it",
+  "choding quietly",
+  "turning it over",
+  "following the thread",
+];
+
 export class Spinner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   private i = 0;
-  constructor(private label: string) {}
+  private labelIdx = Math.floor(Math.random() * THINK_LABELS.length);
+  private ticks = 0;
+  private suffix = "";
+  constructor(
+    private label = THINK_LABELS[0]!,
+    private hooks: ChatUiHooks = {},
+  ) {}
   start() {
-    if (!isTTY) return;
+    if (!isTTY || this.timer) return;
+    this.i = 0;
+    this.ticks = 0;
     this.timer = setInterval(() => {
-      const f = this.frames[this.i++ % this.frames.length];
-      out(`\r${c.cyan(f ?? "")} ${c.dim(this.label)}`);
+      this.ticks++;
+      if (this.ticks % 25 === 0) this.labelIdx = (this.labelIdx + 1) % THINK_LABELS.length;
+      this.paint();
     }, 80);
+    this.paint();
+  }
+  setSuffix(s: string) {
+    this.suffix = s;
   }
   update(label: string) {
     this.label = label;
@@ -140,7 +176,19 @@ export class Spinner {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    if (isTTY) out("\r\x1b[2K");
+    if (isTTY) {
+      this.hooks.before?.();
+      out("\r\x1b[2K");
+      this.hooks.after?.();
+    }
+  }
+  private paint() {
+    const f = this.frames[this.i++ % this.frames.length];
+    const mood = THINK_LABELS[this.labelIdx] ?? this.label;
+    const extra = this.suffix ? `  ${c.dim(this.suffix)}` : "";
+    this.hooks.before?.();
+    out(`\r${c.cyan(f ?? "")} ${c.dim(mood)}${extra}\x1b[K`);
+    this.hooks.after?.();
   }
 }
 
@@ -158,15 +206,9 @@ export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
-export interface ChatUiHooks {
-  /** Erase the input line before we write so the prompt stays at the bottom. */
-  before?: () => void;
-  after?: () => void;
-}
-
 /**
- * Cursor-CLI layout: boxed user turn, dim readable thoughts, grouped work,
- * green edit previews, markdown answer.
+ * Cursor-CLI layout: boxed user turn, spinner (or dim thoughts when /think),
+ * grouped work, green edit previews, markdown answer.
  */
 export class ChatUi {
   private thinking = false;
@@ -174,16 +216,54 @@ export class ChatUi {
   private md = new MarkdownStream();
   private answering = false;
   private observe: WorkEvent[] = [];
+  private showThink: boolean;
+  private thoughtLog = "";
+  private spin: Spinner;
 
-  constructor(private hooks: ChatUiHooks = {}) {}
+  constructor(
+    private hooks: ChatUiHooks = {},
+    opts: { showReasoning?: boolean } = {},
+  ) {
+    this.showThink = !!opts.showReasoning;
+    this.spin = new Spinner("thinking", hooks);
+  }
+
+  beginTurn(chrome?: { budget?: string }) {
+    this.thoughtLog = "";
+    this.spin.setSuffix(chrome?.budget ?? "");
+    if (!this.showThink) this.spin.start();
+  }
+
+  setShowReasoning(on: boolean) {
+    this.showThink = on;
+    if (on) {
+      this.spin.stop();
+      if (this.thoughtLog) {
+        this.flushWork();
+        this.openThinking();
+        this.writeThinking(this.thoughtLog);
+        this.hooks.after?.();
+      }
+    } else {
+      this.closeThinking();
+    }
+  }
+
+  showingReasoning(): boolean {
+    return this.showThink;
+  }
 
   user(text: string, images = 0) {
+    this.spin.stop();
     this.flushWork();
     this.closeThinking();
     this.emit(userBanner(text, images, process.stdout.columns ?? 80) + "\n\n");
   }
 
   reasoning(s: string) {
+    this.thoughtLog += s;
+    if (!this.showThink) return;
+    this.spin.stop();
     this.flushWork();
     this.openThinking();
     this.writeThinking(s);
@@ -191,6 +271,7 @@ export class ChatUi {
   }
 
   text(s: string) {
+    this.spin.stop();
     this.flushWork();
     this.closeThinking();
     if (!this.answering) {
@@ -202,12 +283,14 @@ export class ChatUi {
   }
 
   tool(s: string) {
+    this.spin.stop();
     this.flushWork();
     this.closeThinking();
     this.emit(s + "\n");
   }
 
   work(ev: WorkEvent) {
+    this.spin.stop();
     this.closeThinking();
     if (isObserve(ev.name) && ev.status !== "fail" && ev.status !== "denied") {
       this.observe.push(ev);
@@ -219,17 +302,20 @@ export class ChatUi {
 
   flushWork() {
     if (!this.observe.length) return;
+    this.spin.stop();
     this.emit(formatObserveGroup(this.observe) + "\n\n");
     this.observe = [];
   }
 
   note(s: string) {
+    this.spin.stop();
     this.flushWork();
     this.closeThinking();
     this.emit(c.gray(s) + "\n");
   }
 
   endMessage() {
+    this.spin.stop();
     this.flushWork();
     if (this.answering) this.emit(this.md.flush());
     this.closeThinking();

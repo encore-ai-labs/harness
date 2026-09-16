@@ -243,12 +243,13 @@ export async function buildProjectMap(
   return map;
 }
 
-export function renderProjectMap(m: ProjectMap): string {
+/** Frozen prefix: no dirty count. Tree is the session-start snapshot. */
+export function renderStableProjectMap(m: ProjectMap): string {
   const parts: string[] = [];
   parts.push(`cwd: ${m.cwd}\nplatform: ${m.platform}`);
   if (m.git)
     parts.push(
-      `git: branch ${m.git.branch}, ${m.git.dirty} modified file(s)\nrecent commits:\n${m.git.recent.map((l) => "  " + l).join("\n")}`,
+      `git: branch ${m.git.branch}\nrecent commits:\n${m.git.recent.map((l) => "  " + l).join("\n")}`,
     );
   parts.push(`stack: ${m.stack.details.join(", ") || "unknown"}`);
   const cmds = Object.entries(m.commands);
@@ -259,4 +260,16 @@ export function renderProjectMap(m: ProjectMap): string {
   parts.push(renderSkillCatalog(m.skills));
   parts.push(`tree (depth-limited; use ls/glob for more):\n${m.tree}`);
   return parts.join("\n\n");
+}
+
+/** Ephemeral: dirty git and tree only when it drifted from the frozen prefix. */
+export function renderVolatileProjectMap(m: ProjectMap, frozenTree: string): string {
+  const parts: string[] = [];
+  if (m.git && m.git.dirty > 0) parts.push(`git: ${m.git.dirty} modified file(s)`);
+  if (m.tree !== frozenTree) parts.push(`tree (updated; use ls/glob for more):\n${m.tree}`);
+  return parts.join("\n\n");
+}
+
+export function renderProjectMap(m: ProjectMap): string {
+  return renderStableProjectMap(m);
 }

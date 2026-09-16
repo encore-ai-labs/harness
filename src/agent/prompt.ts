@@ -2,16 +2,22 @@
  * Prompt assembly. Two layers so the prefix cache stays warm:
  *
  *   instructions  stable for the session: identity, mode, map, contract, instruction files
- *   reminder      trailing, ephemeral, not persisted: plan, durable state, remaining budget
+ *   reminder      trailing, ephemeral, not persisted. Only attached when there is
+ *                 something to say: workspace drift, or plan/state after compact.
+ *                 Budget lives in the spinner and `/cost`, not here.
  *
  * Editing the middle of history is a speed bug. The reminder is appended only
- * to the projected input for this request.
+ * to the projected input for this request. An empty reminder is omitted entirely
+ * so Grok does not treat a per-turn status ping as the user talking.
  */
 import type { Config, Mode } from "../config.ts";
 import { renderContract, type Contract } from "./contract.ts";
-import { renderProjectMap, type ProjectMap } from "../context/map.ts";
+import {
+  renderStableProjectMap,
+  renderVolatileProjectMap,
+  type ProjectMap,
+} from "../context/map.ts";
 import type { StateStore } from "../state/store.ts";
-import { fmtUsd } from "../cli/render.ts";
 
 export function buildInstructions(opts: {
   cfg: Config;
@@ -20,7 +26,7 @@ export function buildInstructions(opts: {
   interactive: boolean;
 }): string {
   const parts: string[] = [IDENTITY, modeBlock(opts.cfg.mode, opts.interactive), TOOLS, GATES];
-  parts.push("## Project\n" + renderProjectMap(opts.map));
+  parts.push("## Project\n" + renderStableProjectMap(opts.map));
   if (opts.map.instructions.length) {
     parts.push(
       "## Instruction files\n" +
@@ -33,19 +39,20 @@ export function buildInstructions(opts: {
 
 export function buildReminder(opts: {
   state: StateStore;
-  costUsd: number;
-  maxCostUsd: number;
-  turns: number;
-  maxTurns: number;
+  map: ProjectMap;
+  frozenTree: string;
+  /** Re-inject plan + durable state only after history was compacted away. */
+  compacted: boolean;
 }): string {
   const bits: string[] = [];
-  const plan = opts.state.renderPlanForPrompt();
-  if (plan) bits.push("PLAN\n" + plan);
-  const st = opts.state.renderForPrompt();
-  if (st) bits.push(st);
-  bits.push(
-    `HARNESS STATUS (not the user)  ${fmtUsd(opts.costUsd)} of ${fmtUsd(opts.maxCostUsd)} spent, turn ${opts.turns}/${opts.maxTurns}.`,
-  );
+  if (opts.compacted) {
+    const plan = opts.state.renderPlanForPrompt();
+    if (plan) bits.push("PLAN\n" + plan);
+    const st = opts.state.renderForPrompt();
+    if (st) bits.push(st);
+  }
+  const drift = renderVolatileProjectMap(opts.map, opts.frozenTree);
+  if (drift) bits.push(drift);
   return bits.join("\n\n");
 }
 
@@ -56,8 +63,7 @@ Put plans, uncertainty, and play-by-play in the reasoning channel. The visible a
 
 Be direct. Prefer the dedicated file tools (read, grep, glob, ls, edit, apply_patch, write) over bash for files.
 Only commit or push when the user explicitly asks.
-The user may interrupt a turn and send a new message. Treat that as a steer: stop the old plan and follow the new instruction.
-A trailing developer message is harness status (plan, budget). It is not the user and is not a steer.`;
+Only a role=user message is the human. A new user message mid-turn is a steer: stop the old plan and follow it. Developer notes and workspace drift are harness status — not a request.`;
 
 function modeBlock(mode: Mode, interactive: boolean): string {
   const lines = [

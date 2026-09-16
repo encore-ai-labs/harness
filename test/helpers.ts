@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { boot, silentUi, type Runtime } from "../src/agent/loop.ts";
+import { boot, silentUi, type Runtime, type Ui } from "../src/agent/loop.ts";
 import { FakeClient } from "../src/provider/fake.ts";
 import type { CompletionResult } from "../src/provider/types.ts";
 import type { CliOverrides } from "../src/config.ts";
@@ -21,7 +21,7 @@ export async function bootFake(
   dir: string,
   queue: CompletionResult[],
   cli: CliOverrides = {},
-  extra: { interactive?: boolean; kind?: "chat" | "run"; sessionId?: string } = {},
+  extra: { interactive?: boolean; kind?: "chat" | "run"; sessionId?: string; ui?: Ui } = {},
 ): Promise<Runtime> {
   return boot({
     cwd: dir,
@@ -30,6 +30,6 @@ export async function bootFake(
     kind: extra.kind ?? "chat",
     sessionId: extra.sessionId,
     client: new FakeClient(queue),
-    ui: silentUi,
+    ui: extra.ui ?? silentUi,
   });
 }

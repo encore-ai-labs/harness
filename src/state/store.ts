@@ -16,7 +16,7 @@
  * not from "here is the conversation".
  *
  * The plan is a separate file (.harness/plan.json) because it changes far more
- * often and is rendered into every system prompt.
+ * often than durable state. After compact, the reminder re-injects it.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

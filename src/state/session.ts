@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { type Item, type Usage, ZERO_USAGE, isMessage, textOf } from "../provider/types.ts";
 import type { Contract } from "../agent/contract.ts";
 import type { ContextCursor } from "../agent/context.ts";
+import type { RepeatSnapshot } from "../recovery/classify.ts";
 
 export interface Checkpoint {
   sha: string;
@@ -52,6 +53,12 @@ export interface SessionMeta {
   /** Short human description (first user message) for `harness sessions`. */
   title: string;
   context?: ContextCursor;
+  /** Paths observed this session (how-before-mutate). Survives chat turns and resume. */
+  observed?: string[];
+  /** Repeat detector snapshot. Survives chat turns and resume. */
+  repeats?: RepeatSnapshot;
+  /** When true, stream reasoning to the TTY instead of hiding it behind the spinner. */
+  showReasoning?: boolean;
 }
 
 export function newSessionId(): string {
